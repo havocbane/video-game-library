@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video Game Library</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span>Game Library</span>
+    </div>
+
+    <nav class="shelves" id="shelves" aria-label="Shelves">
+      <button data-shelf="all" class="active">All</button>
+      <button data-shelf="playing">Now Playing</button>
+      <button data-shelf="backlog">Backlog</button>
+      <button data-shelf="finished">Finished</button>
+      <button data-shelf="wishlist">Wishlist</button>
+    </nav>
+
+    <div class="tools">
+      <input id="search" type="search" placeholder="Search…  ( / )" autocomplete="off">
+      <select id="platform-filter" aria-label="Platform">
+        <option value="">All platforms</option>
+      </select>
+      <select id="sort" aria-label="Sort">
+        <option value="title">Title</option>
+        <option value="recent">Recently updated</option>
+        <option value="priority">Priority</option>
+        <option value="platform">Platform</option>
+        <option value="progress">Progress</option>
+      </select>
+      <button id="add-btn" class="btn primary" title="Add a game (N)">+ Add</button>
+      <button id="sync-btn" class="btn" title="Pull your library from Backloggery">⟳ Sync</button>
+      <button id="settings-btn" class="btn icon" title="Settings" aria-label="Settings">⚙</button>
+    </div>
+  </header>
+
+  <section class="stats" id="stats" aria-label="Library stats"></section>
+
+  <main>
+    <section class="stage" id="stage" aria-label="Game carousel" tabindex="0">
+      <button class="nav prev" id="prev" aria-label="Previous game">‹</button>
+      <div class="track" id="track"></div>
+      <button class="nav next" id="next" aria-label="Next game">›</button>
+      <div class="counter" id="counter"></div>
+      <div class="empty" id="empty" hidden>
+        <h2>No games here yet</h2>
+        <p>Add a game, or set your Backloggery username in Settings and sync.</p>
+        <div class="empty-actions">
+          <button class="btn primary" data-action="add">+ Add a game</button>
+          <button class="btn" data-action="settings">Connect Backloggery</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="detail" id="detail" hidden>
+      <div class="detail-head">
+        <div>
+          <h1 id="d-title"></h1>
+          <div class="meta" id="d-meta"></div>
+        </div>
+        <div class="detail-actions">
+          <button class="btn" id="d-cover" title="Look up box art on SteamGridDB">Find cover</button>
+          <button class="btn" id="d-edit">Edit</button>
+          <button class="btn danger" id="d-delete">Delete</button>
+        </div>
+      </div>
+
+      <div class="detail-grid">
+        <div class="field wide">
+          <label>Status</label>
+          <div class="segmented" id="d-status"></div>
+        </div>
+
+        <div class="field">
+          <label for="d-priority">Priority</label>
+          <select id="d-priority"></select>
+        </div>
+        <div class="field">
+          <label for="d-ownership">Ownership</label>
+          <select id="d-ownership"></select>
+        </div>
+        <div class="field">
+          <label>Rating</label>
+          <div class="stars" id="d-rating" role="radiogroup" aria-label="Rating"></div>
+        </div>
+
+        <div class="field">
+          <label for="d-progress">Progress <span id="d-progress-val" class="muted"></span></label>
+          <input id="d-progress" type="range" min="0" max="100" step="5">
+        </div>
+        <div class="field">
+          <label for="d-hours">Hours played</label>
+          <input id="d-hours" type="number" min="0" step="0.5">
+        </div>
+        <div class="field">
+          <label>Achievements</label>
+          <div class="ach">
+            <input id="d-ach-done" type="number" min="0" aria-label="Achievements earned">
+            <span>/</span>
+            <input id="d-ach-total" type="number" min="0" aria-label="Achievements total">
+          </div>
+        </div>
+
+        <div class="field wide">
+          <label for="d-notes">Notes</label>
+          <textarea id="d-notes" rows="2" placeholder="Tags, thoughts, where you left off…"></textarea>
+        </div>
+      </div>
+
+      <div class="log">
+        <form id="log-form" class="log-form">
+          <input id="log-input" placeholder="Log a session or milestone…" autocomplete="off">
+          <button class="btn" type="submit">Log</button>
+        </form>
+        <ol id="log-list"></ol>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="game-dialog">
+    <form method="dialog" id="game-form">
+      <h2 id="game-dialog-title">Add game</h2>
+      <label>Title <input name="title" required autocomplete="off"></label>
+      <label>Platform <input name="platform" list="platform-list" autocomplete="off" placeholder="e.g. Switch, PS5, PC (Steam)"></label>
+      <datalist id="platform-list"></datalist>
+      <div class="row">
+        <label>Status <select name="status"></select></label>
+        <label>Ownership <select name="ownership"></select></label>
+      </div>
+      <div class="row">
+        <label>Format <input name="format" placeholder="Digital / Physical"></label>
+        <label>Region <input name="region" placeholder="North America"></label>
+      </div>
+      <label>Cover image URL <input name="coverUrl" type="url" placeholder="https://…"></label>
+      <menu>
+        <button value="cancel" formnovalidate class="btn">Cancel</button>
+        <button value="save" class="btn primary">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="settings-dialog">
+    <form method="dialog" id="settings-form">
+      <h2>Settings</h2>
+      <fieldset>
+        <legend>Backloggery</legend>
+        <label>Username <input name="backloggeryUsername" autocomplete="off" placeholder="your profile name"></label>
+        <p class="hint">Sync pulls your public Backloggery library. It's one-way: changes here stay local until you make them on Backloggery. <span id="last-sync"></span></p>
+      </fieldset>
+      <fieldset>
+        <legend>Cover art</legend>
+        <label>SteamGridDB API key <input name="steamgriddbKey" type="password" autocomplete="off"></label>
+        <p class="hint">Free key from steamgriddb.com → Preferences → API.</p>
+        <button type="button" class="btn" id="fetch-covers">Fetch missing covers</button>
+        <progress id="cover-progress" hidden></progress>
+      </fieldset>
+      <menu>
+        <button value="cancel" formnovalidate class="btn">Close</button>
+        <button value="save" class="btn primary">Save</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
