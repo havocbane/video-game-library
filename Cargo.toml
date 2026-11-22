@@ -3,6 +3,8 @@ name = "video-game-library"
 version = "0.1.0"
 edition = "2024"
 description = "A carousel-style video game library and backlog tracker with Backloggery sync"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/havocbane/video-game-library"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

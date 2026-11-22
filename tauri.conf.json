@@ -26,6 +26,9 @@
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
+    "license": "GPL-3.0-or-later",
+    "copyright": "Copyright (C) 2026 Joseph Bane",
+    "homepage": "https://github.com/havocbane/video-game-library",
     "icon": ["icons/icon.png", "icons/icon.ico"]
   }
 }

@@ -105,3 +105,13 @@ Add a free [SteamGridDB](https://www.steamgriddb.com/) API key in Settings, then
 | `plugins/` | Bundled external plugins (installed into the data folder on first run) |
 | `src/models.rs` | Game, status/priority/ownership enums |
 | `ui/` | Carousel UI |
+
+## License
+
+Copyright (C) 2026 Joseph Bane
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
+
+Third-party libraries keep their own licenses (mostly MIT/Apache-2.0, plus a few MPL-2.0 libraries used by Tauri), all compatible with GPL-3.0.
+
+Video Game Library is not affiliated with or endorsed by Backloggery, Sony Interactive Entertainment, Valve, GOG, Epic Games, Microsoft, or SteamGridDB. It uses some of their services through unofficial, undocumented endpoints that may change or stop working at any time; use them at your own risk and in line with each service's terms.
