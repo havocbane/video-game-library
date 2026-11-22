@@ -39,16 +39,45 @@ struct RemoteGame {
     parent_inst_id: Option<i64>,
 }
 
-pub async fn fetch_library(http: &reqwest::Client, username: &str) -> Result<Vec<ImportedGame>> {
-    let body = serde_json::json!({ "type": "load_user_library", "username": username.trim() });
-    let resp = http.post(LIBRARY_URL).json(&body).send().await?.error_for_status()?;
-    let value: serde_json::Value = resp.json().await?;
+/// Accepts a bare name, `@name`, or a pasted profile link
+/// (`https://backloggery.com/name/...`) and returns just the name.
+pub fn normalize_username(input: &str) -> String {
+    let s = input.trim();
+    let s = match s.find("backloggery.com/") {
+        Some(i) => &s[i + "backloggery.com/".len()..],
+        None => s,
+    };
+    let s = s.split(['/', '?', '#']).next().unwrap_or_default();
+    s.trim_start_matches('@').trim().to_string()
+}
 
-    // A missing or private profile comes back as something other than a list.
+pub async fn fetch_library(http: &reqwest::Client, username: &str) -> Result<Vec<ImportedGame>> {
+    let username = normalize_username(username);
+    let not_found = || {
+        Error::msg(format!(
+            "Backloggery doesn't recognize the profile \"{username}\". Use the name from your profile's address \
+             (backloggery.com/<name>) and check that the profile is public."
+        ))
+    };
+    if username.is_empty() {
+        return Err(not_found());
+    }
+
+    let body = serde_json::json!({ "type": "load_user_library", "username": username });
+    let resp = http.post(LIBRARY_URL).json(&body).send().await?;
+    // Unknown profiles are answered with 400 "Invalid Request".
+    match resp.status() {
+        reqwest::StatusCode::BAD_REQUEST => return Err(not_found()),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            return Err(Error::msg("Backloggery is limiting requests right now. Wait a minute and sync again."));
+        }
+        _ => {}
+    }
+    let value: serde_json::Value = resp.error_for_status()?.json().await?;
+
+    // Anything other than a list (e.g. an error object) means no library.
     if !value.is_array() {
-        return Err(Error::msg(format!(
-            "Backloggery didn't return a library for \"{username}\". Check the username and that the profile is public."
-        )));
+        return Err(not_found());
     }
     let games: Vec<RemoteGame> = serde_json::from_value(value)
         .map_err(|e| Error::msg(format!("Unexpected Backloggery response format: {e}")))?;
@@ -164,6 +193,25 @@ mod tests {
         assert_eq!(g.region, None);
         assert_eq!((g.achievements_done, g.achievements_total), (16, 22));
         assert_eq!(g.platform, "PC");
+    }
+
+    #[test]
+    fn usernames() {
+        assert_eq!(normalize_username("  tor "), "tor");
+        assert_eq!(normalize_username("@tor"), "tor");
+        assert_eq!(normalize_username("https://backloggery.com/tor"), "tor");
+        assert_eq!(normalize_username("backloggery.com/tor/library?status=10"), "tor");
+        assert_eq!(normalize_username("https://backloggery.com/"), "");
+    }
+
+    #[test]
+    #[ignore]
+    fn live_unknown_profile_is_explained() {
+        let http = reqwest::Client::new();
+        let err = tauri::async_runtime::block_on(fetch_library(&http, "nosuchuser_zz9")).unwrap_err();
+        assert!(err.to_string().contains("doesn't recognize"), "{err}");
+        let games = tauri::async_runtime::block_on(fetch_library(&http, "https://backloggery.com/tor/")).unwrap();
+        assert!(!games.is_empty());
     }
 
     /// Hits the real site: `cargo test -- --ignored live_fetch`

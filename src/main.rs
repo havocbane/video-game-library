@@ -16,6 +16,8 @@ use db::Db;
 
 fn main() {
     tauri::Builder::default()
+        // Opens help links in the user's browser instead of inside the app window.
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // VGL_DATA_DIR points the app at another library (testing, portable installs).
             let data_dir = match std::env::var_os("VGL_DATA_DIR") {

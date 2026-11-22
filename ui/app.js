@@ -707,6 +707,33 @@ function bindSettings() {
   });
 }
 
+// ---------- links ----------
+
+const URL_PATTERN = /https?:\/\/[^\s<>"]+/g;
+
+/// Plain help text with any URLs turned into links (opened by `openExternal`).
+function linkify(text) {
+  const nodes = [];
+  let last = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    // Sentence punctuation right after a URL isn't part of it.
+    const url = match[0].replace(/[.,;:!?)]+$/, "");
+    nodes.push(text.slice(last, match.index));
+    nodes.push(el("a", { href: url, textContent: url.replace(/^https?:\/\/(www\.)?/, ""), title: url }));
+    last = match.index + url.length;
+  }
+  nodes.push(text.slice(last));
+  return nodes.filter((n) => n !== "");
+}
+
+/// Web links open in the user's browser; navigating the app window would lose the library view.
+function openExternal(e) {
+  const a = e.target.closest("a[href]");
+  if (!a || !/^(https?|mailto):/i.test(a.href)) return;
+  e.preventDefault();
+  window.__TAURI__.opener.openUrl(a.href).catch((err) => toast(`Couldn't open the link: ${err}`, "error"));
+}
+
 // ---------- import ----------
 
 async function openImport() {
@@ -730,7 +757,7 @@ function sourceCard(src) {
     input.dataset.key = f.key;
     const label = el("label", {},
       el("span", { textContent: f.label + (f.optional ? " (optional)" : "") }), input,
-      f.help ? el("small", { textContent: f.help }) : null);
+      f.help ? el("small", {}, ...linkify(f.help)) : null);
     return { input, label };
   });
 
@@ -765,7 +792,7 @@ function sourceCard(src) {
     el("header", {},
       el("h3", { textContent: src.name }),
       el("span", { className: `tag ${builtIn ? "" : "plugin"}`, textContent: builtIn ? "Built-in" : "Plugin", title: src.origin })),
-    el("p", { className: "hint", textContent: src.description }),
+    el("p", { className: "hint" }, ...linkify(src.description)),
     ...inputs.map((i) => i.label),
     el("div", { className: "source-actions" }, button, status));
 }
@@ -887,6 +914,7 @@ function bindInput() {
     if (action === "settings") openSettings();
   });
 
+  document.addEventListener("click", openExternal);
   window.addEventListener("beforeunload", () => flushSave());
 }
 

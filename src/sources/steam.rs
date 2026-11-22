@@ -48,10 +48,10 @@ impl Source for Steam {
             description: "Every game you own on Steam, with playtime and box art.".into(),
             fields: vec![
                 SourceField::new("apiKey", "Web API key", FieldKind::Secret)
-                    .help("Free at steamcommunity.com/dev/apikey (any domain name works)."),
+                    .help("Free at https://steamcommunity.com/dev/apikey (any domain name works)."),
                 SourceField::new("steamId", "Steam profile", FieldKind::Text)
                     .placeholder("SteamID64, custom URL name, or profile link")
-                    .help("Profile → Privacy → Game details must be Public."),
+                    .help("\"Game details\" must be Public: https://steamcommunity.com/my/edit/settings"),
             ],
             origin: "built-in".into(),
         }

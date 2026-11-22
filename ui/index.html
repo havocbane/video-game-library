@@ -177,13 +177,13 @@
       <h2>Settings</h2>
       <fieldset>
         <legend>Backloggery</legend>
-        <label>Username <input name="backloggeryUsername" autocomplete="off" placeholder="your profile name"></label>
-        <p class="hint">Sync pulls your public Backloggery library. It's one-way: changes here stay local until you make them on Backloggery. <span id="last-sync"></span></p>
+        <label>Username <input name="backloggeryUsername" autocomplete="off" placeholder="name from backloggery.com/<name>, or paste the link"></label>
+        <p class="hint">Your profile name is the part after <a href="https://backloggery.com">backloggery.com/</a> in your profile's address. Sync pulls your public Backloggery library. It's one-way: changes here stay local until you make them on Backloggery. <span id="last-sync"></span></p>
       </fieldset>
       <fieldset>
         <legend>Cover art</legend>
         <label>SteamGridDB API key <input name="steamgriddbKey" type="password" autocomplete="off"></label>
-        <p class="hint">Free key from steamgriddb.com → Preferences → API.</p>
+        <p class="hint">Free key from <a href="https://www.steamgriddb.com/profile/preferences/api">steamgriddb.com/profile/preferences/api</a> (sign in first).</p>
         <button type="button" class="btn" id="fetch-covers">Fetch missing covers</button>
         <progress id="cover-progress" hidden></progress>
       </fieldset>

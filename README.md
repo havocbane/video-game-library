@@ -71,7 +71,7 @@ The app runs `command` in the plugin folder and writes `{"config": {"token": "..
    "ownership": "subscription", "format": "Digital", "status": "unfinished" }]
 ```
 
-Only `externalId` and `title` are required. A non-zero exit shows stderr to the user, and there's a 5-minute timeout. Field kinds are `text`, `secret` and `path`. See [`plugins/xbox-pc`](plugins/xbox-pc) for a complete example. Plugins are rescanned every time the Import dialog opens. Plugins run with your user's permissions, so only install ones you trust.
+Only `externalId` and `title` are required. A non-zero exit shows stderr to the user, and there's a 5-minute timeout. Field kinds are `text`, `secret` and `path`. Full `https://` URLs in a description or `help` become links that open in the user's browser. See [`plugins/xbox-pc`](plugins/xbox-pc) for a complete example. Plugins are rescanned every time the Import dialog opens. Plugins run with your user's permissions, so only install ones you trust.
 
 Built-in sources implement the `Source` trait in [`src/sources/`](src/sources) and register in `builtin_sources()`.
 

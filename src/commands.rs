@@ -69,7 +69,8 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<()> {
+pub fn save_settings(state: State<'_, AppState>, mut settings: Settings) -> Result<()> {
+    settings.backloggery_username = settings.backloggery_username.as_deref().map(backloggery::normalize_username);
     state.db.save_settings(&settings)
 }
 

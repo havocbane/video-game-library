@@ -49,8 +49,10 @@ impl Source for PlayStation {
             description: "PS4 and PS5 games you've played, with playtime. Uses PlayStation's unofficial app API."
                 .into(),
             fields: vec![SourceField::new("npsso", "NPSSO token", FieldKind::Secret).help(
-                "Sign in at playstation.com, then open ca.account.sony.com/api/v1/ssocookie and copy the \"npsso\" \
-                 value. It expires after about two months.",
+                "Sign in at https://www.playstation.com, then in the same browser open \
+                 https://ca.account.sony.com/api/v1/ssocookie (\"ca\" is Sony's account server, not Canada; it \
+                 works in every region) and copy the value after \"npsso\", without the quotes. It expires after \
+                 about two months.",
             )],
             origin: "built-in".into(),
         }
