@@ -1,0 +1,16 @@
+{
+  "id": "xbox-pc",
+  "name": "Xbox app / Microsoft Store (PC)",
+  "description": "PC games installed through the Xbox app, including Game Pass, with box art from the Microsoft Store. Example external plugin written in PowerShell.",
+  "command": ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "import.ps1"],
+  "fields": [
+    {
+      "key": "gamesFolders",
+      "label": "XboxGames folders",
+      "kind": "text",
+      "placeholder": "Every drive's \\XboxGames folder",
+      "help": "Separate several folders with ;",
+      "optional": true
+    }
+  ]
+}

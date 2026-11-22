@@ -26,14 +26,26 @@
       <select id="platform-filter" aria-label="Platform">
         <option value="">All platforms</option>
       </select>
+      <select id="store-filter" aria-label="Store">
+        <option value="">All stores</option>
+      </select>
+      <select id="format-filter" aria-label="Format">
+        <option value="">All formats</option>
+        <option value="digital">Digital</option>
+        <option value="physical">Physical</option>
+      </select>
       <select id="sort" aria-label="Sort">
         <option value="title">Title</option>
         <option value="recent">Recently updated</option>
         <option value="priority">Priority</option>
         <option value="platform">Platform</option>
+        <option value="store">Store</option>
         <option value="progress">Progress</option>
+        <option value="played">Last played</option>
+        <option value="hours">Hours played</option>
       </select>
       <button id="add-btn" class="btn primary" title="Add a game (N)">+ Add</button>
+      <button id="import-btn" class="btn" title="Import from Steam, GOG Galaxy, Epic, PlayStation, Xbox, CSV…">⇩ Import</button>
       <button id="sync-btn" class="btn" title="Pull your library from Backloggery">⟳ Sync</button>
       <button id="settings-btn" class="btn icon" title="Settings" aria-label="Settings">⚙</button>
     </div>
@@ -49,9 +61,10 @@
       <div class="counter" id="counter"></div>
       <div class="empty" id="empty" hidden>
         <h2>No games here yet</h2>
-        <p>Add a game, or set your Backloggery username in Settings and sync.</p>
+        <p>Import your store libraries, sync Backloggery, or add games by hand.</p>
         <div class="empty-actions">
-          <button class="btn primary" data-action="add">+ Add a game</button>
+          <button class="btn primary" data-action="import">⇩ Import libraries</button>
+          <button class="btn" data-action="add">+ Add a game</button>
           <button class="btn" data-action="settings">Connect Backloggery</button>
         </div>
       </div>
@@ -62,9 +75,11 @@
         <div>
           <h1 id="d-title"></h1>
           <div class="meta" id="d-meta"></div>
+          <div class="meta also" id="d-also" hidden></div>
         </div>
         <div class="detail-actions">
           <button class="btn" id="d-cover" title="Look up box art on SteamGridDB">Find cover</button>
+          <button class="btn" id="d-merge" title="Combine another entry for this game into this one">Merge…</button>
           <button class="btn" id="d-edit">Edit</button>
           <button class="btn danger" id="d-delete">Delete</button>
         </div>
@@ -112,12 +127,18 @@
         </div>
       </div>
 
+      <div class="side">
+      <div class="sources" id="d-sources" hidden>
+        <label>In your stores</label>
+        <ul id="d-sources-list"></ul>
+      </div>
       <div class="log">
         <form id="log-form" class="log-form">
           <input id="log-input" placeholder="Log a session or milestone…" autocomplete="off">
           <button class="btn" type="submit">Log</button>
         </form>
         <ol id="log-list"></ol>
+      </div>
       </div>
     </section>
   </main>
@@ -128,12 +149,19 @@
       <label>Title <input name="title" required autocomplete="off"></label>
       <label>Platform <input name="platform" list="platform-list" autocomplete="off" placeholder="e.g. Switch, PS5, PC (Steam)"></label>
       <datalist id="platform-list"></datalist>
+      <datalist id="format-list">
+        <option value="Digital"></option>
+        <option value="Physical"></option>
+        <option value="Physical (Complete In Box)"></option>
+        <option value="Physical (Game Only)"></option>
+        <option value="Physical (Sealed)"></option>
+      </datalist>
       <div class="row">
         <label>Status <select name="status"></select></label>
         <label>Ownership <select name="ownership"></select></label>
       </div>
       <div class="row">
-        <label>Format <input name="format" placeholder="Digital / Physical"></label>
+        <label>Format <input name="format" list="format-list" placeholder="Digital / Physical"></label>
         <label>Region <input name="region" placeholder="North America"></label>
       </div>
       <label>Cover image URL <input name="coverUrl" type="url" placeholder="https://…"></label>
@@ -164,6 +192,22 @@
         <button value="save" class="btn primary">Save</button>
       </menu>
     </form>
+  </dialog>
+
+  <dialog id="import-dialog" class="wide">
+    <h2>Import libraries</h2>
+    <p class="hint">Imports add games you don't have yet and link store copies to games already in your library (same title on the same platform), so a game you own on Steam and GOG stays one entry. They only raise hours played, fill in missing covers and update last played. Your status, priority, rating, notes and physical entries are never changed. Games you delete stay deleted on later imports.</p>
+    <div id="source-list" class="source-list"></div>
+    <p class="hint">Plugins folder: <code id="plugins-dir"></code>. Add a plugin by putting its folder here, then reopen this dialog.</p>
+    <menu><button type="button" class="btn" id="import-close">Close</button></menu>
+  </dialog>
+
+  <dialog id="merge-dialog" class="wide">
+    <h2>Merge into “<span id="merge-target"></span>”</h2>
+    <p class="hint">Pick the duplicate entry. It will be removed: its store links, play log and Backloggery link move to this game, and it fills in anything this game is missing (cover, rating, notes, hours). Everything already set on this game stays.</p>
+    <input id="merge-search" type="search" placeholder="Search your library…" autocomplete="off">
+    <ul id="merge-results" class="merge-results"></ul>
+    <menu><button type="button" class="btn" id="merge-close">Cancel</button></menu>
   </dialog>
 
   <div class="toasts" id="toasts" aria-live="polite"></div>

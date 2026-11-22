@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -5,11 +9,20 @@ use crate::backloggery;
 use crate::covers;
 use crate::db::Db;
 use crate::error::{Error, Result};
-use crate::models::{CoverReport, Game, GameInput, LogEntry, Settings, SyncReport};
+use crate::models::{CoverReport, Game, GameInput, GameSourceLink, ImportReport, LogEntry, Settings, SyncReport};
+use crate::sources::{self, Source, SourceContext, SourceInfo};
 
 pub struct AppState {
     pub db: Db,
     pub http: reqwest::Client,
+    pub builtin_sources: Vec<Arc<dyn Source>>,
+    pub plugins_dir: PathBuf,
+}
+
+impl AppState {
+    fn sources(&self) -> Vec<Arc<dyn Source>> {
+        sources::all_sources(&self.builtin_sources, &self.plugins_dir)
+    }
 }
 
 impl AppState {
@@ -80,6 +93,80 @@ pub async fn find_cover(state: State<'_, AppState>, id: i64) -> Result<Option<St
         state.db.set_cover(id, url)?;
     }
     Ok(url)
+}
+
+#[tauri::command]
+pub fn merge_games(state: State<'_, AppState>, target_id: i64, other_id: i64) -> Result<Game> {
+    state.db.merge_games(target_id, other_id)
+}
+
+#[tauri::command]
+pub fn split_source(state: State<'_, AppState>, game_id: i64, source: String, external_id: String) -> Result<Game> {
+    state.db.split_source(game_id, &source, &external_id)
+}
+
+#[tauri::command]
+pub fn list_game_sources(state: State<'_, AppState>, game_id: i64) -> Result<Vec<GameSourceLink>> {
+    state.db.list_game_sources(game_id)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceView {
+    #[serde(flatten)]
+    info: SourceInfo,
+    /// Saved settings.
+    config: HashMap<String, String>,
+    /// Values found on this machine, used when a setting is left empty.
+    detected: HashMap<String, String>,
+    last_import: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourcesView {
+    sources: Vec<SourceView>,
+    plugins_dir: String,
+}
+
+#[tauri::command]
+pub fn list_sources(state: State<'_, AppState>) -> Result<SourcesView> {
+    let sources = state
+        .sources()
+        .iter()
+        .map(|s| {
+            let info = s.info();
+            Ok(SourceView {
+                config: state.db.source_config(&info.id)?,
+                detected: s.detect(),
+                last_import: state.db.last_import(&info.id)?,
+                info,
+            })
+        })
+        .collect::<Result<_>>()?;
+    Ok(SourcesView { sources, plugins_dir: state.plugins_dir.display().to_string() })
+}
+
+#[tauri::command]
+pub fn save_source_config(state: State<'_, AppState>, id: String, config: HashMap<String, String>) -> Result<()> {
+    state.db.save_source_config(&id, &config)
+}
+
+#[tauri::command]
+pub async fn run_import(state: State<'_, AppState>, id: String) -> Result<ImportReport> {
+    let source = state
+        .sources()
+        .into_iter()
+        .find(|s| s.info().id == id)
+        .ok_or_else(|| Error::msg(format!("No import source named \"{id}\".")))?;
+
+    // Saved settings win; detected values fill the gaps.
+    let mut config = source.detect();
+    config.extend(state.db.source_config(&id)?.into_iter().filter(|(_, v)| !v.trim().is_empty()));
+
+    let ctx = SourceContext { http: state.http.clone(), config };
+    let games = source.fetch(&ctx).await?;
+    state.db.apply_import(&id, &source.info().name, &games)
 }
 
 #[derive(Clone, Serialize)]

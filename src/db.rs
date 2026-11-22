@@ -1,11 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::error::{Error, Result};
-use crate::models::{Game, GameInput, ImportedGame, LogEntry, Settings, Status, SyncReport};
+use crate::models::{
+    Game, GameInput, GameSourceLink, ImportReport, ImportedGame, LogEntry, Settings, Status, SyncReport,
+};
+use crate::sources::{MatchIndex, SourceGame, normalize_title};
 
 /// Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
 const MIGRATIONS: &[&str] = &[r#"
@@ -47,15 +50,41 @@ const MIGRATIONS: &[&str] = &[r#"
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
+"#, r#"
+    ALTER TABLE games ADD COLUMN last_played TEXT;
+
+    -- One row per store copy imported by a source plugin.
+    CREATE TABLE game_sources (
+        id               INTEGER PRIMARY KEY,
+        game_id          INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+        source           TEXT NOT NULL,
+        external_id      TEXT NOT NULL,
+        store            TEXT,
+        title            TEXT NOT NULL,
+        playtime_minutes INTEGER,
+        last_played      TEXT,
+        imported_at      TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (source, external_id)
+    );
+    CREATE INDEX game_sources_game ON game_sources(game_id);
+
+    -- Imported games the user deleted; later imports skip them.
+    CREATE TABLE ignored_imports (
+        source      TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        PRIMARY KEY (source, external_id)
+    );
 "#];
 
 const GAME_COLUMNS: &str = "id, title, platform, platform_abbr, status, priority, ownership, format, \
     region, rating, progress, hours_played, notes, cover_url, achievements_done, achievements_total, \
-    backloggery_id, local_changes, created_at, updated_at";
+    backloggery_id, local_changes, created_at, updated_at, last_played, \
+    (SELECT group_concat(DISTINCT COALESCE(s.store, s.source)) FROM game_sources s WHERE s.game_id = games.id)";
 
 const KEY_BL_USER: &str = "backloggery_username";
 const KEY_SGDB: &str = "steamgriddb_key";
 const KEY_LAST_SYNC: &str = "backloggery_last_sync";
+const IMPORT_TIME_PREFIX: &str = "import_time.";
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -147,9 +176,285 @@ impl Db {
         Ok(game)
     }
 
+    /// Deletes a game. Its store links are remembered so the next import
+    /// doesn't bring it back.
     pub fn delete_game(&self, id: i64) -> Result<()> {
-        self.conn().execute("DELETE FROM games WHERE id = ?1", [id])?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO ignored_imports (source, external_id)
+             SELECT source, external_id FROM game_sources WHERE game_id = ?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM games WHERE id = ?1", [id])?;
+        tx.commit()?;
         Ok(())
+    }
+
+    pub fn list_game_sources(&self, game_id: i64) -> Result<Vec<GameSourceLink>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT source, external_id, store, title, playtime_minutes, last_played, imported_at
+             FROM game_sources WHERE game_id = ?1 ORDER BY COALESCE(store, source)",
+        )?;
+        let rows = stmt
+            .query_map([game_id], |r| {
+                Ok(GameSourceLink {
+                    source: r.get(0)?,
+                    external_id: r.get(1)?,
+                    store: r.get(2)?,
+                    title: r.get(3)?,
+                    playtime_minutes: r.get(4)?,
+                    last_played: r.get(5)?,
+                    imported_at: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
+    /// Settings for one source, stored as `source.<id>.<key>` rows.
+    pub fn source_config(&self, source: &str) -> Result<HashMap<String, String>> {
+        let prefix = format!("source.{source}.");
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT key, value FROM settings WHERE substr(key, 1, length(?1)) = ?1")?;
+        let rows = stmt
+            .query_map([&prefix], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .filter_map(|row| row.ok())
+            .map(|(k, v)| (k[prefix.len()..].to_string(), v))
+            .collect();
+        Ok(rows)
+    }
+
+    pub fn save_source_config(&self, source: &str, config: &HashMap<String, String>) -> Result<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        for (key, value) in config {
+            set_setting(&tx, &format!("source.{source}.{key}"), Some(value))?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn last_import(&self, source: &str) -> Result<Option<String>> {
+        get_setting(&self.conn(), &format!("{IMPORT_TIME_PREFIX}{source}"))
+    }
+
+    /// Merges a store library into the local one.
+    ///
+    /// Each store copy is linked to one library entry: an existing link wins,
+    /// then a game with the same normalized title on the same platform family,
+    /// otherwise a new game is created. Imports only ever raise hours played,
+    /// fill in a missing cover and move last-played forward; everything you
+    /// set yourself (status, priority, rating, notes...) is left alone.
+    /// `source_name` labels games whose source doesn't name a store.
+    pub fn apply_import(&self, source: &str, source_name: &str, games: &[SourceGame]) -> Result<ImportReport> {
+        let mut report = ImportReport::default();
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        {
+            let mut index = MatchIndex::default();
+            let mut all = tx.prepare("SELECT id, title, platform FROM games ORDER BY id")?;
+            for row in all.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+                let (id, title, platform) = row?;
+                index.insert(&title, &platform, id);
+            }
+
+            let mut ignored = tx.prepare("SELECT 1 FROM ignored_imports WHERE source = ?1 AND external_id = ?2")?;
+            let mut find_link = tx.prepare("SELECT game_id FROM game_sources WHERE source = ?1 AND external_id = ?2")?;
+            let mut insert_game = tx.prepare(
+                "INSERT INTO games (title, platform, status, ownership, format, hours_played, cover_url, last_played)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            let mut upsert_link = tx.prepare(
+                "INSERT INTO game_sources (game_id, source, external_id, store, title, playtime_minutes, last_played)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT (source, external_id) DO UPDATE SET store = excluded.store, title = excluded.title,
+                    playtime_minutes = excluded.playtime_minutes, last_played = excluded.last_played,
+                    imported_at = datetime('now')",
+            )?;
+            let mut refresh = tx.prepare(
+                "UPDATE games SET
+                    hours_played = MAX(hours_played, ?2),
+                    last_played = CASE WHEN ?3 IS NOT NULL AND (last_played IS NULL OR ?3 > last_played)
+                                       THEN ?3 ELSE last_played END,
+                    cover_url = COALESCE(NULLIF(cover_url, ''), ?4)
+                 WHERE id = ?1",
+            )?;
+
+            let mut seen = HashSet::new();
+            for g in games {
+                let title = g.title.trim();
+                if title.is_empty() || g.external_id.is_empty() || !seen.insert(g.external_id.as_str()) {
+                    continue;
+                }
+                if ignored.exists(params![source, g.external_id])? {
+                    report.skipped += 1;
+                    continue;
+                }
+                let platform = match g.platform.trim() {
+                    "" => "PC",
+                    p => p,
+                };
+                let minutes = g.playtime_minutes.unwrap_or(0).max(0);
+                let hours = (minutes as f64 / 60.0 * 10.0).round() / 10.0;
+                let store = g.store.as_deref().unwrap_or(source_name);
+
+                let linked: Option<i64> = find_link.query_row(params![source, g.external_id], |r| r.get(0)).optional()?;
+                let game_id = match (linked, index.find(title, platform)) {
+                    (Some(id), _) => {
+                        report.updated += 1;
+                        id
+                    }
+                    (None, Some(id)) => {
+                        report.matched += 1;
+                        id
+                    }
+                    (None, None) => {
+                        // A store only knows you launched it; half an hour is a fair "started".
+                        let status = g.status.unwrap_or(if minutes >= 30 { Status::Unfinished } else { Status::Unplayed });
+                        insert_game.execute(params![
+                            title,
+                            platform,
+                            status,
+                            g.ownership.unwrap_or_default(),
+                            g.format.as_deref().unwrap_or("Digital"),
+                            hours,
+                            g.cover_url,
+                            g.last_played
+                        ])?;
+                        let id = tx.last_insert_rowid();
+                        add_log(&tx, id, &format!("Imported from {store}"))?;
+                        index.insert(title, platform, id);
+                        report.added += 1;
+                        id
+                    }
+                };
+                upsert_link.execute(params![
+                    game_id, source, g.external_id, store, title, g.playtime_minutes, g.last_played
+                ])?;
+                refresh.execute(params![game_id, hours, g.last_played, g.cover_url])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [format!("{IMPORT_TIME_PREFIX}{source}")],
+        )?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// Folds `other` into `target`: store links, log and Backloggery link move
+    /// over, and gaps in `target` (cover, rating, notes...) are filled from
+    /// `other`. Everything you set on `target` wins. `other` is deleted.
+    pub fn merge_games(&self, target: i64, other: i64) -> Result<Game> {
+        if target == other {
+            return Err(Error::msg("Pick a different game to merge with."));
+        }
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let t = get_game(&tx, target)?;
+        let o = get_game(&tx, other)?;
+        if let (Some(a), Some(b)) = (t.backloggery_id, o.backloggery_id) {
+            if a != b {
+                return Err(Error::msg(
+                    "Both games are separate Backloggery entries. Remove one on Backloggery and sync first, \
+                     or the next sync would bring it back.",
+                ));
+            }
+        }
+
+        tx.execute("UPDATE game_sources SET game_id = ?1 WHERE game_id = ?2", [target, other])?;
+        tx.execute("UPDATE game_log SET game_id = ?1 WHERE game_id = ?2", [target, other])?;
+
+        if t.backloggery_id.is_none() && o.backloggery_id.is_some() {
+            let (parent, updated): (Option<i64>, Option<String>) = tx.query_row(
+                "SELECT backloggery_parent_id, backloggery_updated FROM games WHERE id = ?1",
+                [other],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            // backloggery_id is unique, so release it before moving it.
+            tx.execute("UPDATE games SET backloggery_id = NULL WHERE id = ?1", [other])?;
+            tx.execute(
+                "UPDATE games SET backloggery_id = ?2, backloggery_parent_id = ?3, backloggery_updated = ?4,
+                    platform_abbr = COALESCE(platform_abbr, ?5)
+                 WHERE id = ?1",
+                params![target, o.backloggery_id, parent, updated, o.platform_abbr],
+            )?;
+        }
+
+        let notes = match (t.notes.trim(), o.notes.trim()) {
+            (_, "") => t.notes.clone(),
+            ("", _) => o.notes.clone(),
+            (a, b) if a == b => t.notes.clone(),
+            (a, b) => format!("{a}\n{b}"),
+        };
+        let (done, total) = if t.achievements_total > 0 {
+            (t.achievements_done, t.achievements_total)
+        } else {
+            (o.achievements_done, o.achievements_total)
+        };
+        tx.execute(
+            "UPDATE games SET
+                cover_url = COALESCE(NULLIF(cover_url, ''), ?2),
+                rating = COALESCE(rating, ?3),
+                progress = MAX(progress, ?4),
+                hours_played = MAX(hours_played, ?5),
+                last_played = MAX(COALESCE(last_played, ''), COALESCE(?6, '')),
+                notes = ?7, achievements_done = ?8, achievements_total = ?9,
+                format = COALESCE(format, ?10), region = COALESCE(region, ?11),
+                updated_at = datetime('now')
+             WHERE id = ?1",
+            params![
+                target, o.cover_url, o.rating, o.progress, o.hours_played, o.last_played, notes, done, total,
+                o.format, o.region
+            ],
+        )?;
+        tx.execute("UPDATE games SET last_played = NULL WHERE id = ?1 AND last_played = ''", [target])?;
+        tx.execute("DELETE FROM games WHERE id = ?1", [other])?;
+        add_log(&tx, target, &format!("Merged with {} ({})", o.title, o.platform))?;
+
+        let game = get_game(&tx, target)?;
+        tx.commit()?;
+        Ok(game)
+    }
+
+    /// Moves one store copy off a game it was wrongly matched to and into a
+    /// new game of its own. Its link moves too, so later imports keep it apart.
+    pub fn split_source(&self, game_id: i64, source: &str, external_id: &str) -> Result<Game> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let from = get_game(&tx, game_id)?;
+        let (store, title, minutes, last_played): (Option<String>, String, Option<i64>, Option<String>) = tx
+            .query_row(
+                "SELECT store, title, playtime_minutes, last_played FROM game_sources
+                 WHERE game_id = ?1 AND source = ?2 AND external_id = ?3",
+                params![game_id, source, external_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?
+            .ok_or_else(|| Error::msg("That store copy isn't linked to this game."))?;
+
+        let minutes = minutes.unwrap_or(0).max(0);
+        let status = if minutes >= 30 { Status::Unfinished } else { Status::Unplayed };
+        tx.execute(
+            "INSERT INTO games (title, platform, platform_abbr, status, format, hours_played, last_played)
+             VALUES (?1, ?2, ?3, ?4, 'Digital', ?5, ?6)",
+            params![title, from.platform, from.platform_abbr, status, (minutes as f64 / 6.0).round() / 10.0, last_played],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.execute(
+            "UPDATE game_sources SET game_id = ?1 WHERE source = ?2 AND external_id = ?3",
+            params![id, source, external_id],
+        )?;
+        let store = store.as_deref().unwrap_or(source);
+        add_log(&tx, id, &format!("Split off from {} ({store} copy)", from.title))?;
+        add_log(&tx, game_id, &format!("{store} copy \"{title}\" split into its own game"))?;
+
+        let game = get_game(&tx, id)?;
+        tx.commit()?;
+        Ok(game)
     }
 
     pub fn set_cover(&self, id: i64, url: &str) -> Result<()> {
@@ -235,10 +540,26 @@ impl Db {
                  WHERE id = ?15",
             )?;
 
+            // Games added manually or by a store import that Backloggery may also list.
+            let mut unlinked = MatchIndex::default();
+            let mut stmt =
+                tx.prepare("SELECT id, title, platform FROM games WHERE backloggery_id IS NULL ORDER BY id")?;
+            for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+                let (id, title, platform) = row?;
+                unlinked.insert(&title, &platform, id);
+            }
+
             for g in games {
-                let existing: Option<(i64, Option<String>, bool)> = find
+                let mut existing: Option<(i64, Option<String>, bool)> = find
                     .query_row([g.backloggery_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
                     .optional()?;
+                if existing.is_none() {
+                    if let Some(id) = unlinked.find(&g.title, &g.platform) {
+                        unlinked.remove_game(id);
+                        tx.execute("UPDATE games SET backloggery_id = ?1 WHERE id = ?2", params![g.backloggery_id, id])?;
+                        existing = Some((id, None, false));
+                    }
+                }
                 match existing {
                     None => {
                         let progress: u8 = match g.status {
@@ -333,9 +654,11 @@ fn set_setting(conn: &Connection, key: &str, value: Option<&str>) -> Result<()> 
 }
 
 fn row_to_game(r: &Row<'_>) -> rusqlite::Result<Game> {
+    let title: String = r.get(1)?;
     Ok(Game {
         id: r.get(0)?,
-        title: r.get(1)?,
+        title_key: normalize_title(&title),
+        title,
         platform: r.get(2)?,
         platform_abbr: r.get(3)?,
         status: r.get(4)?,
@@ -354,6 +677,11 @@ fn row_to_game(r: &Row<'_>) -> rusqlite::Result<Game> {
         local_changes: r.get(17)?,
         created_at: r.get(18)?,
         updated_at: r.get(19)?,
+        last_played: r.get(20)?,
+        stores: r
+            .get::<_, Option<String>>(21)?
+            .map(|s| s.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -439,6 +767,159 @@ mod tests {
         let r = db.apply_backloggery(&[imported(1, Status::Unplayed, "t")]).unwrap();
         assert_eq!(r.missing_remote, 1);
         assert_eq!(db.list_games().unwrap().len(), 2);
+    }
+
+    fn store_game(id: &str, title: &str, platform: &str, minutes: i64) -> SourceGame {
+        SourceGame {
+            external_id: id.into(),
+            title: title.into(),
+            platform: platform.into(),
+            store: Some("Steam".into()),
+            playtime_minutes: Some(minutes),
+            last_played: Some("2025-01-01 10:00:00".into()),
+            cover_url: Some(format!("https://img/{id}.jpg")),
+            ownership: None,
+            format: None,
+            status: None,
+        }
+    }
+
+    #[test]
+    fn import_dedupes_across_stores_and_keeps_user_fields() {
+        let db = db();
+        let manual = db
+            .create_game(serde_json::from_str(r#"{"title":"Hades","platform":"PC","status":"completed","format":"Physical"}"#).unwrap())
+            .unwrap();
+
+        let r = db
+            .apply_import("steam", "steam", &[store_game("1145360", "Hades", "PC", 600), store_game("2", "Celeste", "PC", 5)])
+            .unwrap();
+        assert_eq!((r.added, r.matched), (1, 1));
+
+        // GOG copy of the same game links to the same entry.
+        let r = db.apply_import("gog-galaxy", "gog-galaxy", &[store_game("gog_1", "HADES™", "PC", 900)]).unwrap();
+        assert_eq!(r.matched, 1);
+
+        let games = db.list_games().unwrap();
+        assert_eq!(games.len(), 2);
+        let hades = games.iter().find(|g| g.id == manual.id).unwrap();
+        assert_eq!(hades.status, Status::Completed);
+        assert_eq!(hades.format.as_deref(), Some("Physical"));
+        assert_eq!(hades.hours_played, 15.0);
+        assert_eq!(hades.stores.len(), 1); // both links say "Steam" in this test
+        assert_eq!(db.list_game_sources(manual.id).unwrap().len(), 2);
+        let celeste = games.iter().find(|g| g.title == "Celeste").unwrap();
+        assert_eq!(celeste.status, Status::Unplayed);
+        assert_eq!(celeste.format.as_deref(), Some("Digital"));
+
+        // Re-import refreshes instead of duplicating.
+        let r = db.apply_import("steam", "steam", &[store_game("2", "Celeste", "PC", 120)]).unwrap();
+        assert_eq!((r.added, r.updated), (0, 1));
+        assert_eq!(db.list_games().unwrap().iter().find(|g| g.title == "Celeste").unwrap().hours_played, 2.0);
+    }
+
+    #[test]
+    fn deleted_imports_stay_deleted() {
+        let db = db();
+        db.apply_import("steam", "steam", &[store_game("2", "Celeste", "PC", 0)]).unwrap();
+        let id = db.list_games().unwrap()[0].id;
+        db.delete_game(id).unwrap();
+        let r = db.apply_import("steam", "steam", &[store_game("2", "Celeste", "PC", 0)]).unwrap();
+        assert_eq!((r.added, r.skipped), (0, 1));
+        assert!(db.list_games().unwrap().is_empty());
+    }
+
+    #[test]
+    fn backloggery_links_to_imported_games() {
+        let db = db();
+        db.apply_import("steam", "steam", &[store_game("1", "Game 1", "PC", 60)]).unwrap();
+        db.apply_backloggery(&[imported(1, Status::Beaten, "t1")]).unwrap();
+        let games = db.list_games().unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].status, Status::Beaten);
+        assert_eq!(games[0].backloggery_id, Some(1));
+        assert_eq!(games[0].hours_played, 1.0);
+    }
+
+    #[test]
+    fn merge_moves_links_and_fills_gaps() {
+        let db = db();
+        db.apply_import("steam", "Steam", &[store_game("1", "GTA V", "PC", 600)]).unwrap();
+        db.apply_import("epic", "Epic", &[store_game("e1", "Grand Theft Auto V", "PC", 0)]).unwrap();
+        let games = db.list_games().unwrap();
+        let steam = games.iter().find(|g| g.title == "GTA V").unwrap();
+        let epic = games.iter().find(|g| g.title == "Grand Theft Auto V").unwrap();
+        let mut input = input_from(epic);
+        input.status = Status::Beaten;
+        input.cover_url = None;
+        db.update_game(epic.id, input).unwrap();
+
+        let merged = db.merge_games(epic.id, steam.id).unwrap();
+        assert_eq!(merged.status, Status::Beaten); // target's own fields win
+        assert_eq!(merged.hours_played, 10.0); // gaps filled from the other copy
+        assert_eq!(merged.cover_url.as_deref(), Some("https://img/1.jpg"));
+        assert_eq!(db.list_games().unwrap().len(), 1);
+        assert_eq!(db.list_game_sources(merged.id).unwrap().len(), 2);
+        assert!(db.list_log(merged.id).unwrap().iter().any(|l| l.note == "Imported from Steam"));
+
+        // Later imports follow the moved links instead of re-adding.
+        let r = db.apply_import("steam", "Steam", &[store_game("1", "GTA V", "PC", 700)]).unwrap();
+        assert_eq!((r.added, r.updated), (0, 1));
+        assert!(db.merge_games(merged.id, merged.id).is_err());
+    }
+
+    #[test]
+    fn merge_refuses_two_backloggery_entries() {
+        let db = db();
+        db.apply_backloggery(&[imported(1, Status::Beaten, "t"), imported(2, Status::Beaten, "t")]).unwrap();
+        let games = db.list_games().unwrap();
+        assert!(db.merge_games(games[0].id, games[1].id).is_err());
+    }
+
+    #[test]
+    fn merge_takes_over_backloggery_link() {
+        let db = db();
+        db.apply_backloggery(&[imported(7, Status::Completed, "t")]).unwrap();
+        db.apply_import("steam", "Steam", &[store_game("1", "Something Else", "PC", 0)]).unwrap();
+        let games = db.list_games().unwrap();
+        let steam = games.iter().find(|g| g.backloggery_id.is_none()).unwrap();
+        let bl = games.iter().find(|g| g.backloggery_id.is_some()).unwrap();
+        let merged = db.merge_games(steam.id, bl.id).unwrap();
+        assert_eq!(merged.backloggery_id, Some(7));
+        // Backloggery sync now finds the merged game rather than re-adding.
+        let r = db.apply_backloggery(&[imported(7, Status::Completed, "t")]).unwrap();
+        assert_eq!((r.added, r.unchanged), (0, 1));
+    }
+
+    #[test]
+    fn split_keeps_store_copy_apart_on_reimport() {
+        let db = db();
+        let doom_1993 = db
+            .create_game(serde_json::from_str(r#"{"title":"DOOM","platform":"PC","format":"Physical"}"#).unwrap())
+            .unwrap();
+        db.apply_import("steam", "Steam", &[store_game("379720", "DOOM", "PC", 300)]).unwrap();
+        assert_eq!(db.list_games().unwrap().len(), 1);
+
+        let doom_2016 = db.split_source(doom_1993.id, "steam", "379720").unwrap();
+        assert_eq!(doom_2016.status, Status::Unfinished);
+        assert_eq!(doom_2016.hours_played, 5.0);
+        assert!(db.list_game_sources(doom_1993.id).unwrap().is_empty());
+
+        let r = db.apply_import("steam", "Steam", &[store_game("379720", "DOOM", "PC", 300)]).unwrap();
+        assert_eq!((r.added, r.updated), (0, 1));
+        let games = db.list_games().unwrap();
+        assert_eq!(games.len(), 2);
+        assert!(games.iter().any(|g| g.id == doom_2016.id && g.cover_url.is_some()));
+        assert!(db.split_source(doom_1993.id, "steam", "379720").is_err());
+    }
+
+    #[test]
+    fn source_config_round_trips() {
+        let db = db();
+        db.save_source_config("steam", &HashMap::from([("apiKey".into(), "k".into()), ("steamId".into(), "".into())]))
+            .unwrap();
+        db.save_source_config("steam-other", &HashMap::from([("x".into(), "y".into())])).unwrap();
+        assert_eq!(db.source_config("steam").unwrap(), HashMap::from([("apiKey".into(), "k".into())]));
     }
 
     #[test]

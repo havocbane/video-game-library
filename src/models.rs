@@ -79,6 +79,8 @@ str_enum!(Ownership, default = Owned {
 pub struct Game {
     pub id: i64,
     pub title: String,
+    /// Normalized title, equal for the same game across stores and platforms.
+    pub title_key: String,
     pub platform: String,
     pub platform_abbr: Option<String>,
     pub status: Status,
@@ -100,6 +102,10 @@ pub struct Game {
     pub local_changes: bool,
     pub created_at: String,
     pub updated_at: String,
+    /// Most recent play time reported by any linked store.
+    pub last_played: Option<String>,
+    /// Stores this game was imported from, e.g. ["Steam", "GOG"].
+    pub stores: Vec<String>,
 }
 
 /// The editable fields of a game. Unknown fields (id, timestamps, ...) are
@@ -208,4 +214,30 @@ pub struct CoverReport {
     pub found: u32,
     pub not_found: u32,
     pub failed: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportReport {
+    /// New games created.
+    pub added: u32,
+    /// Linked to a game that was already in the library (same title and platform).
+    pub matched: u32,
+    /// Previously imported; playtime, cover and last-played refreshed.
+    pub updated: u32,
+    /// Games you deleted after an earlier import.
+    pub skipped: u32,
+}
+
+/// Where a library entry came from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameSourceLink {
+    pub source: String,
+    pub external_id: String,
+    pub store: Option<String>,
+    pub title: String,
+    pub playtime_minutes: Option<i64>,
+    pub last_played: Option<String>,
+    pub imported_at: String,
 }

@@ -36,12 +36,34 @@ const SHELVES = {
   wishlist: (g) => g.ownership === "wishlist",
 };
 
+const NO_STORE = "__none";
+
+/// Stores a game came from: its import links plus a Backloggery-style
+/// sub-platform such as "PC (Steam)".
+function storesOf(g) {
+  const stores = new Set(g.stores);
+  const sub = /\(([^)]+)\)\s*$/.exec(g.platform);
+  if (sub) stores.add(sub[1]);
+  return [...stores].sort((a, b) => a.localeCompare(b));
+}
+
 const SORTS = {
   title: (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base", numeric: true }),
   recent: (a, b) => b.updatedAt.localeCompare(a.updatedAt),
   priority: (a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority] || SORTS.title(a, b),
   platform: (a, b) => a.platform.localeCompare(b.platform) || SORTS.title(a, b),
+  // Games without a store sort last.
+  store: (a, b) => (storesOf(a)[0] ?? "\uffff").localeCompare(storesOf(b)[0] ?? "\uffff") || SORTS.title(a, b),
   progress: (a, b) => b.progress - a.progress || SORTS.title(a, b),
+  played: (a, b) => (b.lastPlayed ?? "").localeCompare(a.lastPlayed ?? "") || SORTS.title(a, b),
+  hours: (a, b) => b.hoursPlayed - a.hoursPlayed || SORTS.title(a, b),
+};
+
+const isPhysical = (g) => /^physical/i.test(g.format ?? "");
+const FORMATS = {
+  "": () => true,
+  physical: isPhysical,
+  digital: (g) => !isPhysical(g),
 };
 
 // ---------- state ----------
@@ -53,6 +75,8 @@ const state = {
   shelf: "all",
   search: "",
   platform: "",
+  format: "",
+  store: "",
   sort: "title",
 };
 
@@ -86,6 +110,8 @@ function applyFilters({ keepId } = {}) {
   state.filtered = state.games
     .filter(SHELVES[state.shelf])
     .filter((g) => !state.platform || g.platform === state.platform)
+    .filter(FORMATS[state.format])
+    .filter((g) => !state.store || (state.store === NO_STORE ? !storesOf(g).length : storesOf(g).includes(state.store)))
     .filter((g) => !q || g.title.toLowerCase().includes(q) || g.notes.toLowerCase().includes(q))
     .sort(SORTS[state.sort]);
 
@@ -104,6 +130,23 @@ function refreshPlatforms() {
   select.value = platforms.includes(chosen) ? chosen : "";
   state.platform = select.value;
   $("#platform-list").replaceChildren(...platforms.map((p) => el("option", { value: p })));
+
+  const counts = new Map();
+  let none = 0;
+  for (const g of state.games) {
+    const stores = storesOf(g);
+    if (!stores.length) none++;
+    for (const s of stores) counts.set(s, (counts.get(s) ?? 0) + 1);
+  }
+  const storeSelect = $("#store-filter");
+  const stores = [...counts.keys()].sort((a, b) => a.localeCompare(b));
+  storeSelect.replaceChildren(
+    el("option", { value: "", textContent: "All stores" }),
+    ...stores.map((s) => el("option", { value: s, textContent: `${s} (${counts.get(s)})` })),
+    none ? el("option", { value: NO_STORE, textContent: `No store / manual (${none})` }) : null,
+  );
+  storeSelect.value = stores.includes(state.store) || (state.store === NO_STORE && none) ? state.store : "";
+  state.store = storeSelect.value;
 }
 
 function renderShelfCounts() {
@@ -284,12 +327,40 @@ function renderMeta(g) {
   const chips = [g.platform, g.format, g.region, g.ownership !== "owned" ? OWNERSHIP.find(([v]) => v === g.ownership)?.[1] : null]
     .filter(Boolean)
     .map((t) => el("span", { className: "chip", textContent: t }));
+  if (g.lastPlayed) chips.push(el("span", { className: "chip", textContent: `Last played ${g.lastPlayed.slice(0, 10)}` }));
   if (g.backloggeryId) {
     chips.push(g.localChanges
       ? el("span", { className: "chip warn", textContent: "Edited locally", title: "Differs from Backloggery until you make the same change there" })
       : el("span", { className: "chip", textContent: "Backloggery" }));
   }
   $("#d-meta").replaceChildren(...chips);
+  renderAlsoOn(g);
+}
+
+/// Other entries for the same game: other platforms, or a second copy.
+function renderAlsoOn(g) {
+  const others = state.games.filter((x) => x.id !== g.id && x.titleKey === g.titleKey);
+  const box = $("#d-also");
+  box.hidden = !others.length;
+  box.replaceChildren(el("span", { className: "also-label", textContent: "Also on" }), ...others.map((o) => {
+    const label = o.platform === g.platform ? `${o.platform} · ${o.format ?? "another copy"}` : o.platform;
+    const b = el("button", { type: "button", className: "chip link", textContent: label, title: `${o.title} · ${statusOf(o.status).label}` });
+    b.onclick = () => jumpTo(o.id);
+    return b;
+  }));
+}
+
+/// Selects a game, clearing filters first if it's hidden by them.
+function jumpTo(id) {
+  flushSave();
+  if (!state.filtered.some((g) => g.id === id)) {
+    state.search = $("#search").value = "";
+    state.platform = $("#platform-filter").value = "";
+    state.store = $("#store-filter").value = "";
+    state.format = $("#format-filter").value = "";
+    setShelf("all", false);
+  }
+  applyFilters({ keepId: id });
 }
 
 function renderStars(g) {
@@ -339,6 +410,44 @@ function renderDetail() {
   $("#d-notes").value = g.notes;
 
   loadLog(g.id);
+  loadSources(g);
+}
+
+let sourcesRequest = 0;
+async function loadSources(g) {
+  const req = ++sourcesRequest;
+  const box = $("#d-sources");
+  if (!g.stores.length) {
+    box.hidden = true;
+    return;
+  }
+  const links = await call("list_game_sources", { gameId: g.id }).catch(() => []);
+  if (req !== sourcesRequest) return;
+  box.hidden = !links.length;
+  $("#d-sources-list").replaceChildren(...links.map((l) => {
+    const bits = [];
+    if (l.playtimeMinutes) bits.push(`${(l.playtimeMinutes / 60).toFixed(1)} h`);
+    if (l.lastPlayed) bits.push(l.lastPlayed.slice(0, 10));
+    const store = l.store ?? l.source;
+    const name = l.title === g.title ? store : `${store} · ${l.title}`;
+    const split = el("button", {
+      type: "button",
+      className: "link-btn",
+      textContent: "Split off",
+      title: "This store copy is a different game: move it into its own entry",
+    });
+    split.onclick = async () => {
+      if (!confirm(`Move the ${store} copy “${l.title}” out of “${g.title}” into its own game?`)) return;
+      await flushSave();
+      const created = await call("split_source", { gameId: g.id, source: l.source, externalId: l.externalId }).catch(() => null);
+      if (!created) return;
+      await reload();
+      toast(`“${created.title}” is now its own game.`);
+    };
+    return el("li", { title: `${l.source}: ${l.externalId}` },
+      el("span", { textContent: name }),
+      el("span", { className: "src-right" }, bits.join(" · "), split));
+  }));
 }
 
 let logRequest = 0;
@@ -396,6 +505,9 @@ function bindDetail() {
   };
 
   $("#d-edit").onclick = () => openGameDialog(current());
+  $("#d-merge").onclick = openMerge;
+  $("#merge-close").onclick = () => $("#merge-dialog").close();
+  $("#merge-search").oninput = () => renderMergeResults(current());
 
   $("#d-delete").onclick = async () => {
     const g = current();
@@ -406,6 +518,54 @@ function bindDetail() {
     const next = state.filtered[state.index + 1] ?? state.filtered[state.index - 1];
     afterLibraryChange(next?.id);
   };
+}
+
+// ---------- merge ----------
+
+function openMerge() {
+  const g = current();
+  if (!g) return;
+  $("#merge-target").textContent = g.title;
+  $("#merge-search").value = "";
+  renderMergeResults(g);
+  $("#merge-dialog").showModal();
+  $("#merge-search").focus();
+}
+
+function renderMergeResults(g) {
+  const words = $("#merge-search").value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  // Likely duplicates first: the same normalized title, then a shared key word.
+  const keyword = g.titleKey.split(" ").find((w) => !["the", "a", "an"].includes(w)) ?? "";
+  const rank = (x) => (x.titleKey === g.titleKey ? 0 : keyword && x.titleKey.split(" ").includes(keyword) ? 1 : 2);
+  const matches = state.games
+    .filter((x) => x.id !== g.id && words.every((w) => x.title.toLowerCase().includes(w)))
+    .filter((x) => words.length || rank(x) < 2)
+    .sort((a, b) => rank(a) - rank(b) || SORTS.title(a, b))
+    .slice(0, 50);
+
+  $("#merge-results").replaceChildren(...(matches.length
+    ? matches.map((x) => {
+      const meta = [x.platform, x.format, storesOf(x).join(", "), statusOf(x.status).label].filter(Boolean).join(" · ");
+      const b = el("button", { type: "button" },
+        el("strong", { textContent: x.title }),
+        el("span", { className: "hint", textContent: meta }));
+      b.onclick = () => mergeInto(g, x);
+      return el("li", {}, b);
+    })
+    : [el("li", { className: "hint", textContent: words.length ? "No matches." : "No likely duplicates. Search your library above." })]));
+}
+
+async function mergeInto(target, other) {
+  const ok = confirm(`Merge “${other.title}” (${other.platform}) into “${target.title}” (${target.platform})?
+
+“${other.title}” will be removed from your library.`);
+  if (!ok) return;
+  await flushSave();
+  const merged = await call("merge_games", { targetId: target.id, otherId: other.id }).catch(() => null);
+  if (!merged) return;
+  $("#merge-dialog").close();
+  await reload();
+  toast(`Merged into “${merged.title}”.`);
 }
 
 // ---------- add / edit dialog ----------
@@ -547,6 +707,69 @@ function bindSettings() {
   });
 }
 
+// ---------- import ----------
+
+async function openImport() {
+  const view = await call("list_sources").catch(() => null);
+  if (!view) return;
+  $("#plugins-dir").textContent = view.pluginsDir;
+  $("#source-list").replaceChildren(...view.sources.map(sourceCard));
+  $("#import-dialog").showModal();
+}
+
+function sourceCard(src) {
+  const inputs = src.fields.map((f) => {
+    const detected = src.detected[f.key];
+    const input = el("input", {
+      type: f.kind === "secret" ? "password" : "text",
+      value: src.config[f.key] ?? "",
+      placeholder: detected ? `${detected} (detected)` : f.placeholder ?? "",
+      autocomplete: "off",
+      spellcheck: false,
+    });
+    input.dataset.key = f.key;
+    const label = el("label", {},
+      el("span", { textContent: f.label + (f.optional ? " (optional)" : "") }), input,
+      f.help ? el("small", { textContent: f.help }) : null);
+    return { input, label };
+  });
+
+  const lastImport = src.lastImport ? `Last imported ${src.lastImport} UTC` : "Not imported yet";
+  const status = el("p", { className: "hint source-status", textContent: lastImport });
+  const button = el("button", { type: "button", className: "btn primary", textContent: "Import" });
+  button.onclick = async () => {
+    const config = Object.fromEntries(inputs.map(({ input }) => [input.dataset.key, input.value.trim()]));
+    button.disabled = true;
+    button.textContent = "Importing…";
+    status.classList.remove("error");
+    status.textContent = "Working… large libraries can take a minute.";
+    try {
+      await invoke("save_source_config", { id: src.id, config });
+      await flushSave();
+      const r = await invoke("run_import", { id: src.id });
+      const parts = [`${r.added} added`, `${r.matched} matched existing`, `${r.updated} refreshed`];
+      if (r.skipped) parts.push(`${r.skipped} skipped (you deleted them)`);
+      status.textContent = parts.join(" · ");
+      await reload();
+    } catch (err) {
+      status.textContent = String(err);
+      status.classList.add("error");
+    } finally {
+      button.disabled = false;
+      button.textContent = "Import";
+    }
+  };
+
+  const builtIn = src.origin === "built-in";
+  return el("section", { className: "source-card" },
+    el("header", {},
+      el("h3", { textContent: src.name }),
+      el("span", { className: `tag ${builtIn ? "" : "plugin"}`, textContent: builtIn ? "Built-in" : "Plugin", title: src.origin })),
+    el("p", { className: "hint", textContent: src.description }),
+    ...inputs.map((i) => i.label),
+    el("div", { className: "source-actions" }, button, status));
+}
+
 // ---------- input ----------
 
 function setShelf(shelf, apply = true) {
@@ -638,6 +861,14 @@ function bindInput() {
     state.platform = e.target.value;
     applyFilters();
   };
+  $("#store-filter").onchange = (e) => {
+    state.store = e.target.value;
+    applyFilters();
+  };
+  $("#format-filter").onchange = (e) => {
+    state.format = e.target.value;
+    applyFilters();
+  };
   $("#sort").onchange = (e) => {
     state.sort = e.target.value;
     applyFilters({ keepId: current()?.id });
@@ -646,10 +877,13 @@ function bindInput() {
 
   $("#add-btn").onclick = () => openGameDialog();
   $("#sync-btn").onclick = sync;
+  $("#import-btn").onclick = openImport;
+  $("#import-close").onclick = () => $("#import-dialog").close();
   $("#settings-btn").onclick = openSettings;
   $("#empty").addEventListener("click", (e) => {
     const action = e.target.closest("[data-action]")?.dataset.action;
     if (action === "add") openGameDialog();
+    if (action === "import") openImport();
     if (action === "settings") openSettings();
   });
 
