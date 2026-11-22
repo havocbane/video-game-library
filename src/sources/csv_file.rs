@@ -80,9 +80,14 @@ fn parse(text: &str, default_platform: &str, default_format: Option<&str>) -> Re
         let ownership = field(ownership_col).and_then(|s| Ownership::parse(&enum_key(s)));
         let hours: Option<f64> = field(hours_col).and_then(|h| h.parse().ok());
 
+        // Rows have no ids; title + platform (+ store, so a Steam key and a
+        // DRM-free copy stay two store links) keeps re-imports idempotent.
+        let mut external_id = format!("{}|{}", normalize_title(title), platform.to_lowercase());
+        if let Some(store) = field(store_col) {
+            external_id = format!("{external_id}|{}", store.to_lowercase());
+        }
         games.push(SourceGame {
-            // Rows have no ids; title + platform keeps re-imports idempotent.
-            external_id: format!("{}|{}", normalize_title(title), platform.to_lowercase()),
+            external_id,
             title: title.to_string(),
             platform,
             store: field(store_col).map(str::to_string),
@@ -119,6 +124,16 @@ mod tests {
         assert_eq!(games[1].platform, "GameCube");
         assert_eq!(games[1].ownership, Some(Ownership::Wishlist));
         assert_eq!(games[1].format.as_deref(), Some("Digital"));
+    }
+
+    #[test]
+    fn same_game_from_two_stores_keeps_both() {
+        let csv = "Title,Platform,Store\nCeleste,PC,Steam\nCeleste,PC,Humble\nHades,PC,\n";
+        let games = parse(csv, "PC", None).unwrap();
+        assert_eq!(games[0].external_id, "celeste|pc|steam");
+        assert_eq!(games[1].external_id, "celeste|pc|humble");
+        // Rows without a store keep the original id, so earlier imports stay linked.
+        assert_eq!(games[2].external_id, "hades|pc");
     }
 
     #[test]
