@@ -35,6 +35,17 @@ Click **⇩ Import** and pick a source. Each source keeps its own settings, and 
 | Xbox app / Microsoft Store (PC) | Installed PC/Game Pass games with Store box art | Nothing. This is a bundled **external plugin** (PowerShell) |
 | CSV file | Anything else: Nintendo purchases, a physical shelf, Humble/itch exports | A CSV with a `title` column. Optional: platform, store, status, ownership, format, hours, last played |
 
+### Humble Bundle
+
+Humble has no export button, so [`tools/humble-export.js`](tools/humble-export.js) builds a CSV from your orders:
+
+1. Sign in at [humblebundle.com](https://www.humblebundle.com) and open your [library page](https://www.humblebundle.com/home/library).
+2. Open the browser console (F12 → **Console**). Chrome and Edge may ask you to type `allow pasting` first.
+3. Paste the whole script and press Enter. `humble-library-<date>.csv` downloads when it's done.
+4. Import it with **⇩ Import → CSV file**.
+
+You get one row per game, covering both store keys (Steam, GOG, Epic…) and DRM-free downloads. Soundtracks, ebooks, comics, videos and expired keys are left out. Humble's library list doesn't say what a download is, so the script checks each purchase's page to tell games from books and music. A large library takes several minutes. When it finishes, the console shows two tables: what became a game, and what was left out and why. To try it quickly first, run `window.HUMBLE_EXPORT_DIAGNOSE = true` before pasting. That reads only the first few pages, prints a sample entry with keys and links blanked, and saves no file. A game you have both as a key and DRM-free becomes one entry with both stores listed. The script only reads your own library from humblebundle.com and builds the file in your browser. Humble has no public API: the script calls the same internal action the library page uses, so a site update can break it. If it fails, the console output says which step went wrong. Alternatively, GOG Galaxy has a community Humble integration that the Galaxy importer picks up.
+
 How imports merge:
 
 - A store copy links to an existing game with the same title on the same platform family. Case, ™/®, punctuation and edition suffixes like "GOTY" or "Complete Edition" are ignored when comparing. So Hades from Steam, GOG and your hand-added physical copy all become one entry on PC, and the detail panel lists each store under **In your stores**.
