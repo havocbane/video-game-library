@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::backloggery;
+use crate::cover_cache::CoverCache;
 use crate::covers;
 use crate::db::Db;
 use crate::error::{Error, Result};
@@ -17,6 +18,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub builtin_sources: Vec<Arc<dyn Source>>,
     pub plugins_dir: PathBuf,
+    pub covers: Arc<CoverCache>,
 }
 
 impl AppState {
@@ -26,6 +28,17 @@ impl AppState {
 }
 
 impl AppState {
+    /// Brings the cover cache in line with the library in the background:
+    /// downloads new covers and deletes ones no game uses any more.
+    pub fn refresh_cover_cache(&self) {
+        let Ok(urls) = self.db.cover_urls() else { return };
+        let covers = Arc::clone(&self.covers);
+        tauri::async_runtime::spawn(async move {
+            covers.prune(&urls);
+            covers.warm(urls).await;
+        });
+    }
+
     fn steamgriddb_key(&self) -> Result<String> {
         self.db.settings()?.steamgriddb_key.ok_or_else(|| {
             Error::msg("Add a SteamGridDB API key in Settings to look up cover art.")
@@ -40,17 +53,23 @@ pub fn list_games(state: State<'_, AppState>) -> Result<Vec<Game>> {
 
 #[tauri::command]
 pub fn create_game(state: State<'_, AppState>, input: GameInput) -> Result<Game> {
-    state.db.create_game(input)
+    let game = state.db.create_game(input)?;
+    state.refresh_cover_cache();
+    Ok(game)
 }
 
 #[tauri::command]
 pub fn update_game(state: State<'_, AppState>, id: i64, input: GameInput) -> Result<Game> {
-    state.db.update_game(id, input)
+    let game = state.db.update_game(id, input)?;
+    state.refresh_cover_cache();
+    Ok(game)
 }
 
 #[tauri::command]
 pub fn delete_game(state: State<'_, AppState>, id: i64) -> Result<()> {
-    state.db.delete_game(id)
+    state.db.delete_game(id)?;
+    state.refresh_cover_cache();
+    Ok(())
 }
 
 #[tauri::command]
@@ -82,7 +101,9 @@ pub async fn sync_backloggery(state: State<'_, AppState>) -> Result<SyncReport> 
         .backloggery_username
         .ok_or_else(|| Error::msg("Set your Backloggery username in Settings first."))?;
     let games = backloggery::fetch_library(&state.http, &username).await?;
-    state.db.apply_backloggery(&games)
+    let report = state.db.apply_backloggery(&games)?;
+    state.refresh_cover_cache();
+    Ok(report)
 }
 
 #[tauri::command]
@@ -92,13 +113,16 @@ pub async fn find_cover(state: State<'_, AppState>, id: i64) -> Result<Option<St
     let url = covers::find_cover(&state.http, &key, &title).await?;
     if let Some(url) = &url {
         state.db.set_cover(id, url)?;
+        state.refresh_cover_cache();
     }
     Ok(url)
 }
 
 #[tauri::command]
 pub fn merge_games(state: State<'_, AppState>, target_id: i64, other_id: i64) -> Result<Game> {
-    state.db.merge_games(target_id, other_id)
+    let game = state.db.merge_games(target_id, other_id)?;
+    state.refresh_cover_cache();
+    Ok(game)
 }
 
 #[tauri::command]
@@ -167,7 +191,9 @@ pub async fn run_import(state: State<'_, AppState>, id: String) -> Result<Import
 
     let ctx = SourceContext { http: state.http.clone(), config };
     let games = source.fetch(&ctx).await?;
-    state.db.apply_import(&id, &source.info().name, &games)
+    let report = state.db.apply_import(&id, &source.info().name, &games)?;
+    state.refresh_cover_cache();
+    Ok(report)
 }
 
 #[derive(Clone, Serialize)]
@@ -210,5 +236,6 @@ pub async fn fetch_missing_covers(app: AppHandle, state: State<'_, AppState>) ->
         // The UI only uses this for progress; a dropped event is harmless.
         let _ = app.emit("covers-progress", CoverProgress { done: i + 1, total, id, url });
     }
+    state.refresh_cover_cache();
     Ok(report)
 }

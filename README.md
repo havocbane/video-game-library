@@ -14,7 +14,7 @@ cargo test -- --ignored   # also hits live Backloggery and reads this PC's Galax
 
 Release installer (MSI/NSIS) needs the Tauri CLI: `cargo install tauri-cli --locked`, then `cargo tauri build`.
 
-Data lives in `%APPDATA%\com.havoc.videogamelibrary\` (`library.db` and `plugins\`). Set `VGL_DATA_DIR` to use a different folder, for example a test library.
+Data lives in `%APPDATA%\com.havoc.videogamelibrary\` (`library.db`, `covers\` and `plugins\`). Set `VGL_DATA_DIR` to use a different folder, for example a test library.
 
 ## Using it
 
@@ -103,6 +103,8 @@ Settings → enter your Backloggery username → **Sync**. Sync is **one-way (Ba
 
 Add a free [SteamGridDB](https://www.steamgriddb.com/) API key in Settings, then use **Find cover** on a game or **Fetch missing covers**. You can also paste any image URL via **Edit**. Games without art get a generated cover.
 
+Covers are saved to a `covers` folder in the data folder the first time they load, and the rest of the library downloads in the background, so art keeps working offline and after a store moves or removes an image. Files no game uses any more are deleted automatically. Delete the folder to re-download everything.
+
 ## Layout
 
 | Path | What |
@@ -112,6 +114,7 @@ Add a free [SteamGridDB](https://www.steamgriddb.com/) API key in Settings, then
 | `src/db.rs` | SQLite schema/migrations, queries, sync merge logic (+ tests) |
 | `src/backloggery.rs` | Backloggery client and code mappings (+ tests) |
 | `src/covers.rs` | SteamGridDB lookup |
+| `src/cover_cache.rs` | Local cover cache served to the UI as `cover://` |
 | `src/sources/` | Import plugin system: `Source` trait, matching, built-in sources, external plugin runner |
 | `plugins/` | Bundled external plugins (installed into the data folder on first run) |
 | `src/models.rs` | Game, status/priority/ownership enums |

@@ -1,7 +1,10 @@
 "use strict";
 
-const { invoke } = window.__TAURI__.core;
+const { invoke, convertFileSrc } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+
+/** Web covers load through the app's local cache (cover:// protocol); anything else loads as is. */
+const coverSrc = (url) => (/^https?:\/\//i.test(url) ? convertFileSrc(url, "cover") : url);
 
 // ---------- reference data ----------
 
@@ -205,7 +208,7 @@ function fillCard(card, g) {
   art.append(fallback);
 
   if (g.coverUrl) {
-    const img = el("img", { src: g.coverUrl, alt: "", loading: "lazy", decoding: "async" });
+    const img = el("img", { src: coverSrc(g.coverUrl), alt: "", loading: "lazy", decoding: "async" });
     img.onload = () => fallback.remove();
     img.onerror = () => img.remove();
     art.append(img);

@@ -465,6 +465,14 @@ impl Db {
         Ok(())
     }
 
+    /// Every distinct cover URL in the library, for the cover cache.
+    pub fn cover_urls(&self) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare("SELECT DISTINCT cover_url FROM games WHERE cover_url IS NOT NULL AND cover_url != ''")?;
+        let rows = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+
     pub fn game_title(&self, id: i64) -> Result<String> {
         Ok(self.conn().query_row("SELECT title FROM games WHERE id = ?1", [id], |r| r.get(0))?)
     }
