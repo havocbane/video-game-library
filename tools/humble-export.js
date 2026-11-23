@@ -43,9 +43,34 @@
 
   // ---------- turning library items into rows ----------
 
-  function keyStore(type) {
+  // In key types and bundle names "switch" means the console; in game titles it
+  // usually doesn't ("Mighty Switch Force!"), so titles must say "Nintendo Switch".
+  const nintendoSystems = (strict) => [
+    [/wii[\s_-]*u/i, "Wii U"],
+    [/\b(new\s*)?[23]ds\b/i, "Nintendo 3DS"],
+    [strict ? /nintendo[\s_-]*switch/i : /switch/i, "Nintendo Switch"],
+  ];
+
+  /// Which Nintendo system a key is for. Humble sold Wii U and 3DS keys as well
+  /// as Switch ones, and the key type may only say "nintendo", so the bundle
+  /// name and then the titles are checked too. The first hint that names
+  /// exactly one system wins; a bundle like "Wii U & 3DS" is no help. With no
+  /// clue, it's just "Nintendo" rather than a guess.
+  function nintendoPlatform(type, { bundle, titles = [] } = {}) {
+    const hints = [[type, false], [bundle, false], ...titles.map((t) => [t, true])];
+    for (const [hint, strict] of hints) {
+      if (typeof hint !== "string") continue;
+      const named = nintendoSystems(strict).filter(([re]) => re.test(hint));
+      if (named.length === 1) return named[0][1];
+    }
+    return "Nintendo";
+  }
+
+  /// Store and platform for a key type. `hints` ({ bundle, titles }) narrow
+  /// down Nintendo keys.
+  function keyStore(type, hints) {
     const t = typeof type === "string" ? type.toLowerCase() : "";
-    if (t.includes("switch") || t.includes("nintendo")) return { store: "Nintendo", platform: "Nintendo Switch" };
+    if (/switch|nintendo|wii|3ds/.test(t)) return { store: "Nintendo", platform: nintendoPlatform(t, hints) };
     if (t.includes("xbox")) return { store: "Xbox", platform: "Xbox" };
     if (t.includes("playstation") || t.includes("psn")) return { store: "PlayStation", platform: "PlayStation" };
     return { store: STORES[t] || (t ? t[0].toUpperCase() + t.slice(1) : "Humble"), platform: "PC" };
@@ -53,7 +78,7 @@
 
   const isStoreType = (type) => {
     const t = type.toLowerCase();
-    return t in STORES || /switch|nintendo|xbox|playstation|psn/.test(t);
+    return t in STORES || /switch|nintendo|wii|3ds|xbox|playstation|psn/.test(t);
   };
 
   /// Drops store suffixes Humble sometimes puts in key names ("Celeste Steam Key").
@@ -112,7 +137,7 @@
 
       for (const key of keys) {
         if (key.expired) continue;
-        const { store, platform } = keyStore(key.type || deliveryMethods[0]);
+        const { store, platform } = keyStore(key.type || deliveryMethods[0], { bundle, titles: [key.title, item.title] });
         add({
           title: cleanTitle(key.title || item.title),
           platform,
@@ -143,7 +168,7 @@
       // ebooks) don't make a game on their own.
       const method = deliveryMethods.find((m) => typeof m === "string" && isStoreType(m));
       if (!kinds.size && method) {
-        const { store, platform } = keyStore(method);
+        const { store, platform } = keyStore(method, { bundle, titles: [item.title] });
         add({ title: cleanTitle(item.title), platform, store, keyStatus: "", bundle }, "store, from delivery method");
       }
 
